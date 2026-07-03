@@ -1,5 +1,5 @@
 use std::fmt::{Debug, Display, Formatter};
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::ops::{Bound, Deref, RangeBounds};
 
 use pubgrub::{Ranges, SetRelation, VersionSet};
@@ -12,10 +12,26 @@ use uv_pep440::{Operator, Version, VersionSpecifiers};
 /// metadata: a pre-release inside this region participates in normal version ordering, while one
 /// outside it is considered only after stable candidates are exhausted. The region is always
 /// clipped to `versions`.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Range<T> {
     versions: Ranges<T>,
     prerelease_region: Option<Box<Ranges<T>>>,
+}
+
+// PubGrub defines equality and hashing in terms of version membership. The admission region affects
+// candidate ordering instead, so [`VersionSet::selection_eq`] compares it separately.
+impl<T: PartialEq> PartialEq for Range<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.versions == other.versions
+    }
+}
+
+impl<T: Eq> Eq for Range<T> {}
+
+impl<T: Hash> Hash for Range<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.versions.hash(state);
+    }
 }
 
 impl<T> Deref for Range<T> {
@@ -75,11 +91,6 @@ impl<T: Debug + Display + Clone + Eq + Ord> Range<T> {
     /// Return the bounded region in which pre-releases are explicitly enabled.
     pub(crate) fn prerelease_region(&self) -> Option<&Ranges<T>> {
         self.prerelease_region.as_deref()
-    }
-
-    /// Return whether two ranges have the same bounds and candidate-selection behavior.
-    pub(crate) fn selection_eq(&self, other: &Self) -> bool {
-        self.versions == other.versions && self.prerelease_region == other.prerelease_region
     }
 
     pub(crate) fn complement(&self) -> Self {
@@ -177,6 +188,10 @@ impl<T: Debug + Display + Clone + Eq + Ord + Hash> VersionSet for Range<T> {
 
     fn contains(&self, version: &Self::V) -> bool {
         self.versions.contains(version)
+    }
+
+    fn selection_eq(&self, other: &Self) -> bool {
+        self.versions == other.versions && self.prerelease_region == other.prerelease_region
     }
 
     fn full() -> Self {
@@ -317,7 +332,8 @@ mod tests {
         let range = range(">=2.0b1");
         let complemented = range.complement().complement();
 
-        assert_eq!(range.versions(), complemented.versions());
+        assert_eq!(range, complemented);
+        assert!(!range.selection_eq(&complemented));
         assert!(complemented.prerelease_region().is_none());
     }
 
@@ -332,12 +348,11 @@ mod tests {
     }
 
     #[test]
-    fn range_identity_includes_prerelease_admission() {
+    fn range_identity_ignores_prerelease_admission() {
         let plain = range(">=1.0");
         let opted_in = plain.intersection(&range(">=1.0a1"));
 
-        assert_eq!(plain.versions(), opted_in.versions());
-        assert_ne!(plain, opted_in);
+        assert_eq!(plain, opted_in);
         assert!(!plain.selection_eq(&opted_in));
     }
 
