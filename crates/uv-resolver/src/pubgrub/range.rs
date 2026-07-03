@@ -93,6 +93,13 @@ impl<T: Debug + Display + Clone + Eq + Ord> Range<T> {
         self.prerelease_region.as_deref()
     }
 
+    /// Replace the pre-release admission region while preserving logical version membership.
+    ///
+    /// The region is clipped to this range's versions.
+    pub(crate) fn with_prerelease_region(&self, prerelease_region: &Ranges<T>) -> Self {
+        Self::from_parts(self.versions.clone(), Some(prerelease_region.clone()))
+    }
+
     pub(crate) fn complement(&self) -> Self {
         // A complement is an exclusion, so it does not grant pre-release admission.
         Self::from_versions(self.versions.complement())
@@ -354,6 +361,25 @@ mod tests {
 
         assert_eq!(plain, opted_in);
         assert!(!plain.selection_eq(&opted_in));
+    }
+
+    #[test]
+    fn replacing_prerelease_region_preserves_membership_and_clips_admission() {
+        let plain = range(">=1,<3");
+        let admission = range(">=0.5a1");
+        let prerelease_region = admission
+            .prerelease_region()
+            .expect("the explicit range should admit pre-releases");
+        let enriched = plain.with_prerelease_region(prerelease_region);
+        let prerelease_region = enriched
+            .prerelease_region()
+            .expect("the enriched range should admit pre-releases");
+
+        assert_eq!(plain, enriched);
+        assert!(!plain.selection_eq(&enriched));
+        assert!(prerelease_region.contains(&version("2.0a1")));
+        assert!(!prerelease_region.contains(&version("0.9a1")));
+        assert!(!prerelease_region.contains(&version("3.5a1")));
     }
 
     #[test]
