@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 use indexmap::IndexSet;
 use itertools::Itertools;
 use owo_colors::OwoColorize;
-use pubgrub::{DerivationTree, Derived, External, Map, Range, Ranges, Term};
+use pubgrub::{DerivationTree, Derived, External, Map, Ranges, Term};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::trace;
 
@@ -25,9 +25,9 @@ use crate::candidate_selector::CandidateSelector;
 use crate::dependency_provider::UvDependencyProvider;
 use crate::fork_indexes::ForkIndexes;
 use crate::fork_urls::ForkUrls;
-use crate::prerelease::AllowPrerelease;
+use crate::prerelease::PrereleaseMode;
 use crate::pubgrub::{
-    PubGrubHint, PubGrubPackage, PubGrubPackageInner, PubGrubReportFormatter,
+    PubGrubHint, PubGrubPackage, PubGrubPackageInner, PubGrubReportFormatter, Range,
     report_derivation_tree,
 };
 use crate::python_requirement::PythonRequirement;
@@ -523,20 +523,26 @@ impl NoSolutionError {
 
                     let versions = SentinelRange::from(&versions).strip();
                     Some(DerivationTree::External(External::NoVersions(
-                        package, versions,
+                        package,
+                        versions.into(),
                     )))
                 }
                 External::FromDependencyOf(package1, versions1, package2, versions2) => {
                     let versions1 = SentinelRange::from(&versions1).strip();
                     let versions2 = SentinelRange::from(&versions2).strip();
                     Some(DerivationTree::External(External::FromDependencyOf(
-                        package1, versions1, package2, versions2,
+                        package1,
+                        versions1.into(),
+                        package2,
+                        versions2.into(),
                     )))
                 }
                 External::Custom(package, versions, reason) => {
                     let versions = SentinelRange::from(&versions).strip();
                     Some(DerivationTree::External(External::Custom(
-                        package, versions, reason,
+                        package,
+                        versions.into(),
+                        reason,
                     )))
                 }
             },
@@ -547,10 +553,10 @@ impl NoSolutionError {
                     .map(|(package, term)| {
                         let term = match term {
                             Term::Positive(versions) => {
-                                Term::Positive(SentinelRange::from(&versions).strip())
+                                Term::Positive(SentinelRange::from(&versions).strip().into())
                             }
                             Term::Negative(versions) => {
-                                Term::Negative(SentinelRange::from(&versions).strip())
+                                Term::Negative(SentinelRange::from(&versions).strip().into())
                             }
                         };
                         (package, term)
@@ -655,12 +661,7 @@ impl NoSolutionError {
         tree = collapse_unavailable_versions(tree);
         tree = collapse_redundant_depends_on_no_versions(tree);
 
-        tree = simplify_derivation_tree_ranges(
-            tree,
-            &self.included_versions,
-            &self.selector,
-            &self.env,
-        );
+        tree = simplify_derivation_tree_ranges(tree, &self.included_versions, &self.selector);
 
         // This needs to be applied _after_ simplification of the ranges
         tree = collapse_redundant_no_versions(tree);
@@ -1269,10 +1270,16 @@ fn drop_root_dependency_on_project(tree: ErrorTree, project: &PackageName) -> Er
 
 /// A version range that may include local version sentinels (`+[max]`).
 #[derive(Debug)]
-pub struct SentinelRange<'range>(&'range Range<Version>);
+pub struct SentinelRange<'range>(&'range Ranges<Version>);
 
 impl<'range> From<&'range Range<Version>> for SentinelRange<'range> {
     fn from(range: &'range Range<Version>) -> Self {
+        Self(range.versions())
+    }
+}
+
+impl<'range> From<&'range Ranges<Version>> for SentinelRange<'range> {
+    fn from(range: &'range Ranges<Version>) -> Self {
         Self(range)
     }
 }
@@ -1506,51 +1513,34 @@ fn simplify_derivation_tree_ranges(
     tree: ErrorTree,
     included_versions: &FxHashMap<PackageName, BTreeSet<Version>>,
     candidate_selector: &CandidateSelector,
-    resolver_environment: &ResolverEnvironment,
 ) -> ErrorTree {
     map_derivation_tree(
         tree,
         |mut external| {
             match &mut external {
                 External::FromDependencyOf(package1, versions1, package2, versions2) => {
-                    if let Some(simplified) = simplify_range(
-                        versions1,
-                        package1,
-                        included_versions,
-                        candidate_selector,
-                        resolver_environment,
-                    ) {
+                    if let Some(simplified) =
+                        simplify_range(versions1, package1, included_versions, candidate_selector)
+                    {
                         *versions1 = simplified;
                     }
-                    if let Some(simplified) = simplify_range(
-                        versions2,
-                        package2,
-                        included_versions,
-                        candidate_selector,
-                        resolver_environment,
-                    ) {
+                    if let Some(simplified) =
+                        simplify_range(versions2, package2, included_versions, candidate_selector)
+                    {
                         *versions2 = simplified;
                     }
                 }
                 External::NoVersions(package, versions) => {
-                    if let Some(simplified) = simplify_range(
-                        versions,
-                        package,
-                        included_versions,
-                        candidate_selector,
-                        resolver_environment,
-                    ) {
+                    if let Some(simplified) =
+                        simplify_range(versions, package, included_versions, candidate_selector)
+                    {
                         *versions = simplified;
                     }
                 }
                 External::Custom(package, versions, _) => {
-                    if let Some(simplified) = simplify_range(
-                        versions,
-                        package,
-                        included_versions,
-                        candidate_selector,
-                        resolver_environment,
-                    ) {
+                    if let Some(simplified) =
+                        simplify_range(versions, package, included_versions, candidate_selector)
+                    {
                         *versions = simplified;
                     }
                 }
@@ -1570,7 +1560,6 @@ fn simplify_derivation_tree_ranges(
                                 &package,
                                 included_versions,
                                 candidate_selector,
-                                resolver_environment,
                             )
                             .unwrap_or(versions),
                         ),
@@ -1580,7 +1569,6 @@ fn simplify_derivation_tree_ranges(
                                 &package,
                                 included_versions,
                                 candidate_selector,
-                                resolver_environment,
                             )
                             .unwrap_or(versions),
                         ),
@@ -1601,14 +1589,13 @@ fn simplify_range(
     package: &PubGrubPackage,
     included_versions: &FxHashMap<PackageName, BTreeSet<Version>>,
     candidate_selector: &CandidateSelector,
-    resolver_environment: &ResolverEnvironment,
 ) -> Option<Range<Version>> {
     // If there's not a package name or included versions, we can't simplify anything
     let name = package.name()?;
     let versions = included_versions.get(name)?;
 
     // If this is a full range, there's nothing to simplify
-    if range == &Range::full() {
+    if range.versions() == &Ranges::full() {
         return None;
     }
 
@@ -1620,10 +1607,7 @@ fn simplify_range(
     }
 
     // Check if pre-releases are allowed
-    let prereleases_not_allowed = candidate_selector
-        .prerelease_strategy()
-        .allows(name, resolver_environment)
-        != AllowPrerelease::Yes;
+    let prereleases_not_allowed = candidate_selector.prerelease_mode() == PrereleaseMode::Disallow;
 
     let any_prerelease = range.iter().any(|(start, end)| {
         let is_pre1 = match start {
@@ -1640,20 +1624,22 @@ fn simplify_range(
     });
 
     // Simplify the range, as implemented in PubGrub
-    Some(range.simplify(versions.iter().filter(|version| {
-        // If there are pre-releases in the range segments, we need to include pre-releases
-        if any_prerelease {
-            return true;
-        }
+    Some(Range::from_versions(range.simplify(
+        versions.iter().filter(|version| {
+            // If there are pre-releases in the range segments, we need to include pre-releases
+            if any_prerelease {
+                return true;
+            }
 
-        // If pre-releases are not allowed, filter out pre-releases
-        if prereleases_not_allowed && version.any_prerelease() {
-            return false;
-        }
+            // If pre-releases are not allowed, filter out pre-releases
+            if prereleases_not_allowed && version.any_prerelease() {
+                return false;
+            }
 
-        // Otherwise, include the version
-        true
-    })))
+            // Otherwise, include the version
+            true
+        }),
+    )))
 }
 
 #[cfg(test)]

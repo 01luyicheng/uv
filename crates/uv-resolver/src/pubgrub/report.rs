@@ -7,7 +7,7 @@ use indexmap::IndexSet;
 use itertools::Itertools;
 use jiff::Timestamp;
 use owo_colors::OwoColorize;
-use pubgrub::{DerivationTree, Derived, External, Map, Range, ReportFormatter, Term};
+use pubgrub::{DerivationTree, Derived, External, Map, ReportFormatter, Term};
 use reqwest::StatusCode;
 use rustc_hash::FxHashMap;
 
@@ -26,8 +26,8 @@ use crate::error::{ErrorTree, PrefixMatch};
 use crate::exclude_newer::EffectiveExcludeNewerSource;
 use crate::fork_indexes::ForkIndexes;
 use crate::fork_urls::ForkUrls;
-use crate::prerelease::AllowPrerelease;
-use crate::pubgrub::{PubGrubPackage, PubGrubPackageInner, PubGrubPython};
+use crate::prerelease::PrereleaseMode;
+use crate::pubgrub::{PubGrubPackage, PubGrubPackageInner, PubGrubPython, Range};
 use crate::python_requirement::{PythonRequirement, PythonRequirementSource};
 use crate::resolver::{
     MetadataUnavailable, UnavailableErrorChain, UnavailablePackage, UnavailableReason,
@@ -753,7 +753,7 @@ impl PubGrubReportFormatter<'_> {
                     if let Some(name) = package.name_no_root() {
                         // Check for no versions due to pre-release options.
                         if !fork_urls.contains_key(name) {
-                            self.prerelease_hint(name, set, selector, env, options, output_hints);
+                            self.prerelease_hint(name, set, selector, options, output_hints);
                         }
 
                         // Check for no versions due to no `--find-links` flat index.
@@ -811,7 +811,7 @@ impl PubGrubReportFormatter<'_> {
                     if let Some(name) = package.name_no_root() {
                         // Check for no versions due to pre-release options.
                         if !fork_urls.contains_key(name) {
-                            self.prerelease_hint(name, set, selector, env, options, output_hints);
+                            self.prerelease_hint(name, set, selector, options, output_hints);
                         }
 
                         // Check for no versions due to no `--find-links` flat index.
@@ -1299,11 +1299,10 @@ impl PubGrubReportFormatter<'_> {
         name: &PackageName,
         set: &Range<Version>,
         selector: &CandidateSelector,
-        env: &ResolverEnvironment,
         options: &Options,
         hints: &mut IndexSet<PubGrubHint>,
     ) {
-        if selector.prerelease_strategy().allows(name, env) == AllowPrerelease::Yes {
+        if selector.prerelease_mode() != PrereleaseMode::Disallow {
             return;
         }
 
