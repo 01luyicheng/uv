@@ -1,5 +1,5 @@
 use std::fmt::{Debug, Display, Formatter};
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::ops::{Bound, Deref, RangeBounds};
 
 use pubgrub::{Ranges, SetRelation, VersionSet};
@@ -12,7 +12,7 @@ use uv_pep440::{Operator, Version, VersionSpecifiers};
 /// metadata: a pre-release inside this region participates in normal version ordering, while one
 /// outside it is considered only after stable candidates are exhausted. The region is always
 /// clipped to `versions`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Range<T> {
     versions: Ranges<T>,
     prerelease_region: Option<Box<Ranges<T>>>,
@@ -23,22 +23,6 @@ impl<T> Deref for Range<T> {
 
     fn deref(&self) -> &Self::Target {
         &self.versions
-    }
-}
-
-// PubGrub defines equality and hashing in terms of version membership. The admission region affects
-// candidate ordering, not which versions satisfy a term, so selection caches compare it separately.
-impl<T: PartialEq> PartialEq for Range<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.versions == other.versions
-    }
-}
-
-impl<T: Eq> Eq for Range<T> {}
-
-impl<T: Hash> Hash for Range<T> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.versions.hash(state);
     }
 }
 
@@ -224,9 +208,13 @@ impl<T: Debug + Display + Clone + Eq + Ord> Display for Range<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
     use std::str::FromStr;
 
-    use pubgrub::{SetRelation, VersionSet};
+    use pubgrub::{
+        Dependencies, DependencyConstraints, DependencyProvider, Incompatibility,
+        PackageResolutionStatistics, SetRelation, State, VersionSet,
+    };
 
     use super::Range;
     use uv_pep440::{Version, VersionSpecifiers};
@@ -235,6 +223,45 @@ mod tests {
         Range::from(
             VersionSpecifiers::from_str(specifiers).expect("valid version specifiers for test"),
         )
+    }
+
+    fn version(version: &str) -> Version {
+        Version::from_str(version).expect("valid version")
+    }
+
+    struct TestDependencyProvider;
+
+    impl DependencyProvider for TestDependencyProvider {
+        type P = &'static str;
+        type V = Version;
+        type VS = Range<Version>;
+        type Priority = ();
+        type M = String;
+        type Err = Infallible;
+
+        fn prioritize(
+            &self,
+            _package: &Self::P,
+            _range: &Self::VS,
+            _package_conflicts_counts: &PackageResolutionStatistics,
+        ) -> Self::Priority {
+        }
+
+        fn choose_version(
+            &self,
+            _package: &Self::P,
+            _range: &Self::VS,
+        ) -> Result<Option<Self::V>, Self::Err> {
+            Ok(None)
+        }
+
+        fn get_dependencies(
+            &self,
+            _package: &Self::P,
+            _version: &Self::V,
+        ) -> Result<Dependencies<Self::P, Self::VS, Self::M>, Self::Err> {
+            Ok(Dependencies::Available(DependencyConstraints::default()))
+        }
     }
 
     #[test]
@@ -299,10 +326,45 @@ mod tests {
         let plain = range(">=1.0");
         let opted_in = plain.intersection(&range(">=1.0a1"));
 
-        assert_eq!(plain, opted_in);
-        assert!(!plain.selection_eq(&opted_in));
         assert_eq!(plain.relation(&opted_in), SetRelation::Subset);
         assert!(plain.subset_of(&opted_in));
         assert!(!plain.is_disjoint(&opted_in));
+    }
+
+    #[test]
+    fn range_identity_includes_prerelease_admission() {
+        let plain = range(">=1.0");
+        let opted_in = plain.intersection(&range(">=1.0a1"));
+
+        assert_eq!(plain.versions(), opted_in.versions());
+        assert_ne!(plain, opted_in);
+        assert!(!plain.selection_eq(&opted_in));
+    }
+
+    #[test]
+    fn dependency_merging_keeps_prerelease_admission_distinct() {
+        let mut state = State::<TestDependencyProvider>::init("root", version("0"));
+        let dependent = state.package_store.alloc("a");
+        let dependency = state.package_store.alloc("c");
+
+        state.add_incompatibility(Incompatibility::from_dependency(
+            dependent,
+            Range::singleton(version("1")),
+            (dependency, range(">=1")),
+        ));
+        state.add_incompatibility(Incompatibility::from_dependency(
+            dependent,
+            Range::singleton(version("2")),
+            (dependency, range(">=1,>0a1")),
+        ));
+
+        assert_eq!(
+            state
+                .incompatibilities
+                .get(&dependency)
+                .expect("dependency incompatibilities should be registered")
+                .len(),
+            2
+        );
     }
 }
